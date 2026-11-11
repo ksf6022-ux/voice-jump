@@ -161,23 +161,30 @@ pitchThrInput.oninput = () => { pitchThr = +pitchThrInput.value; syncLabels(); s
 let analyser = null, buf = null, volume = 0, sampleRate = 48000, pitch = 0;
 
 // 자기상관으로 음높이(Hz) 찾기. 소리가 너무 작거나 음이 뚜렷하지 않으면 0
-const PITCH_WIN = 1024;
-let corr = null;
+// 빠르게 하려고 소리를 절반으로 줄여서(다운샘플) 계산하고, 가장 최근 소리 구간을 기준으로 봄
+const PITCH_WIN = 512;
+let dbuf = null, corr = null;
 function detectPitch() {
+  const n = buf.length >> 1, sr = sampleRate / 2;
+  if (!dbuf) dbuf = new Float32Array(n);
+  for (let j = 0; j < n; j++) dbuf[j] = (buf[2 * j] + buf[2 * j + 1]) * 0.5;
+
+  const s = n - PITCH_WIN; // 가장 최근 구간의 시작
   let energy = 0;
-  for (let i = 0; i < PITCH_WIN; i++) energy += buf[i] * buf[i];
+  for (let i = 0; i < PITCH_WIN; i++) energy += dbuf[s + i] * dbuf[s + i];
   if (Math.sqrt(energy / PITCH_WIN) < 0.01) return 0;
 
-  const minLag = Math.floor(sampleRate / PITCH_MAX);
-  const maxLag = Math.min(buf.length - PITCH_WIN - 1, Math.ceil(sampleRate / 80));
+  const minLag = Math.floor(sr / PITCH_MAX);
+  const maxLag = Math.min(s - 2, Math.ceil(sr / 80));
   if (!corr || corr.length < maxLag + 2) corr = new Float32Array(maxLag + 2);
 
   let best = 0;
   for (let lag = minLag; lag <= maxLag + 1; lag++) {
     let xy = 0, yy = 0;
+    const o = s - lag;
     for (let i = 0; i < PITCH_WIN; i++) {
-      const y = buf[i + lag];
-      xy += buf[i] * y; yy += y * y;
+      const y = dbuf[o + i];
+      xy += dbuf[s + i] * y; yy += y * y;
     }
     corr[lag] = (2 * xy) / (energy + yy + 1e-9); // -1~1, 1이면 완벽히 반복
     if (corr[lag] > best) best = corr[lag];
@@ -190,7 +197,7 @@ function detectPitch() {
     if (c >= best * 0.9 && c >= corr[lag - 1] && c >= corr[lag + 1]) {
       const a = corr[lag - 1], b = corr[lag + 1];
       const shift = (a - b) / (2 * (a - 2 * c + b) || 1);
-      return sampleRate / (lag + shift);
+      return sr / (lag + shift);
     }
   }
   return 0;
@@ -214,12 +221,16 @@ async function initMic() {
 function readVolume() {
   if (!analyser) return 0;
   analyser.getFloatTimeDomainData(buf);
+  // 크기는 가장 최근 512개 샘플(약 0.01초)만 보고 계산 → 소리를 내자마자 반응
+  const VOL_WIN = 512;
   let sum = 0;
-  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-  const rms = Math.sqrt(sum / buf.length);
+  for (let i = buf.length - VOL_WIN; i < buf.length; i++) sum += buf[i] * buf[i];
+  const rms = Math.sqrt(sum / VOL_WIN);
   const v = Math.min(100, rms * gain * 300);
-  volume = volume * 0.5 + v * 0.5; // 살짝 부드럽게
-  pitch = detectPitch();
+  // 커질 때는 바로, 작아질 때만 부드럽게
+  volume = v > volume ? v : volume * 0.6 + v * 0.4;
+  // 조용할 때는 음높이 계산을 건너뜀 (휴대폰에서 버벅임 방지)
+  pitch = volume >= SHOOT_MIN_VOLUME ? detectPitch() : 0;
   return volume;
 }
 
@@ -237,7 +248,7 @@ const DIFFS = {
     gravity: 0.9, jumpMin: 13, jumpExtra: 8,
     tallChance: 0.35, shortH: [32, 18], tallH: [60, 20], obsW: [22, 16],
     flyScore: 400, flyChance: 0.2,
-    gapMin: 38, gapRand: 60, hitPad: 6, lives: 1, highFrames: 3,
+    gapMin: 38, gapRand: 60, hitPad: 6, lives: 1, highFrames: 2,
   },
 };
 let diffKey = 'easy';
